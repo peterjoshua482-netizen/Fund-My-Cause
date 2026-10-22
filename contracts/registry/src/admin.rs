@@ -161,17 +161,18 @@ pub(crate) fn update_status(
 ) -> Result<(), ContractError> {
     require_initialized(&env)?;
 
-    let admin: Address = env
-        .storage()
-        .instance()
+    // Cache the instance storage handle once — avoids 4 separate borrows across
+    // the admin read, the global campaign list read, and the two status list
+    // reads/writes below (gas opt #1321).
+    let inst = env.storage().instance();
+
+    let admin: Address = inst
         .get(&KEY_ADMIN)
         .ok_or(ContractError::NotInitialized)?;
     admin.require_auth();
 
     // Guard: campaign must already be registered globally
-    let campaigns: Vec<Address> = env
-        .storage()
-        .instance()
+    let campaigns: Vec<Address> = inst
         .get(&KEY_CAMPAIGNS)
         .unwrap_or_else(|| Vec::new(&env));
     if !campaigns.contains(&campaign_id) {
@@ -180,9 +181,7 @@ pub(crate) fn update_status(
 
     // Remove from old status list
     let old_key = RegDataKey::StatusList(old_status as u32);
-    let old_list: Vec<Address> = env
-        .storage()
-        .instance()
+    let old_list: Vec<Address> = inst
         .get(&old_key)
         .unwrap_or_else(|| Vec::new(&env));
     let mut filtered_old = Vec::new(&env);
@@ -192,18 +191,16 @@ pub(crate) fn update_status(
             filtered_old.push_back(addr);
         }
     }
-    env.storage().instance().set(&old_key, &filtered_old);
+    inst.set(&old_key, &filtered_old);
 
     // Add to new status list
     let new_key = RegDataKey::StatusList(new_status as u32);
-    let mut new_list: Vec<Address> = env
-        .storage()
-        .instance()
+    let mut new_list: Vec<Address> = inst
         .get(&new_key)
         .unwrap_or_else(|| Vec::new(&env));
     if !new_list.contains(&campaign_id) {
         new_list.push_back(campaign_id);
-        env.storage().instance().set(&new_key, &new_list);
+        inst.set(&new_key, &new_list);
     }
 
     Ok(())

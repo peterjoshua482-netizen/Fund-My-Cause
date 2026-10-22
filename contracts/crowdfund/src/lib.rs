@@ -1041,6 +1041,9 @@ impl CrowdfundContract {
             .ok_or(ContractError::StreamNotConfigured)?;
 
         let now = env.ledger().timestamp();
+        // Cache remaining reads from the same instance storage handle — avoids
+        // 4 separate borrows for KEY_DEADLINE, KEY_GOAL, KEY_TOTAL, KEY_STATUS
+        // (gas opt #1321).
         let deadline: u64 = inst.get(&KEY_DEADLINE).unwrap();
         let goal: i128 = inst.get(&KEY_GOAL).unwrap();
         let total: i128 = inst.get(&KEY_TOTAL).unwrap();
@@ -2979,15 +2982,19 @@ impl CrowdfundContract {
         }
 
         // Perform the contribution as if delegator is contributing
-        let min: i128 = env.storage().instance().get(&KEY_MIN).unwrap();
+        // Cache the instance storage handle once — avoids 5 separate borrows for
+        // KEY_MIN, KEY_STATUS, KEY_DEADLINE, KEY_MAX, WhitelistOnly, KEY_VISIBILITY
+        // (gas opt #1321).
+        let inst = env.storage().instance();
+        let min: i128 = inst.get(&KEY_MIN).unwrap();
         validate_min_contribution(amount, min)?;
 
-        let status: Status = env.storage().instance().get(&KEY_STATUS).unwrap();
+        let status: Status = inst.get(&KEY_STATUS).unwrap();
         if status != Status::Active {
             return Err(ContractError::NotActive);
         }
 
-        let deadline: u64 = env.storage().instance().get(&KEY_DEADLINE).unwrap();
+        let deadline: u64 = inst.get(&KEY_DEADLINE).unwrap();
         validate_deadline_not_passed(env.ledger().timestamp(), deadline)?;
 
         // ── Per-contributor cap (#927: this path previously never enforced ────
@@ -2996,7 +3003,7 @@ impl CrowdfundContract {
         // contribution could silently bypass the campaign cap that direct
         // `contribute()` calls enforce. Reusing the same shared helper closes
         // that gap.
-        let max: i128 = env.storage().instance().get(&KEY_MAX).unwrap_or(0);
+        let max: i128 = inst.get(&KEY_MAX).unwrap_or(0);
         let key = DataKey::Contribution(delegator.clone());
         let prev: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         validate_contributor_cap(amount, max, prev)?;
@@ -3011,14 +3018,8 @@ impl CrowdfundContract {
             return Err(ContractError::Blacklisted);
         }
 
-        let whitelist_only: bool = env
-            .storage()
-            .instance()
-            .get(&DataKey::WhitelistOnly)
-            .unwrap_or(false);
-        let visibility: Visibility = env
-            .storage()
-            .instance()
+        let whitelist_only: bool = inst.get(&DataKey::WhitelistOnly).unwrap_or(false);
+        let visibility: Visibility = inst
             .get(&KEY_VISIBILITY)
             .unwrap_or(Visibility::Public);
         if (whitelist_only || visibility == Visibility::Private)
@@ -3046,9 +3047,9 @@ impl CrowdfundContract {
             .persistent()
             .extend_ttl(&\1, TTL_PERSISTENT_ENTRY, TTL_PERSISTENT_ENTRY);
 
-        let total: i128 = env.storage().instance().get(&KEY_TOTAL).unwrap();
+        let total: i128 = inst.get(&KEY_TOTAL).unwrap();
         let new_total = total.checked_add(amount).ok_or(ContractError::Overflow)?;
-        env.storage().instance().set(&KEY_TOTAL, &new_total);
+        inst.set(&KEY_TOTAL, &new_total);
 
         let presence_key = DataKey::ContributorPresence(delegator.clone());
         let is_present: bool = env
@@ -3061,19 +3062,13 @@ impl CrowdfundContract {
             env.storage()
                 .persistent()
                 .extend_ttl(&presence_key, TTL_PERSISTENT_ENTRY, TTL_PERSISTENT_ENTRY);
-            let count: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::ContributorCount)
-                .unwrap();
+            let count: u32 = inst.get(&DataKey::ContributorCount).unwrap();
             // O(1) indexed write, same pattern as contribute()
             let index_key = DataKey::ContributorIndex(count);
             env.storage().persistent().set(&index_key, &delegator);
             env.storage().persistent().extend_ttl(&\1, TTL_PERSISTENT_ENTRY, TTL_PERSISTENT_ENTRY);
             let new_count = count.checked_add(1).ok_or(ContractError::Overflow)?;
-            env.storage()
-                .instance()
-                .set(&DataKey::ContributorCount, &new_count);
+            inst.set(&DataKey::ContributorCount, &new_count);
         }
 
         env.events().publish(
@@ -3611,38 +3606,33 @@ impl CrowdfundContract {
     /// # Returns
     /// CampaignInfo struct with all campaign details
     pub fn get_campaign_info(env: Env) -> CampaignInfo {
-        let creator: Address = env.storage().instance().get(&KEY_CREATOR).unwrap();
-        let token: Address = env.storage().instance().get(&KEY_TOKEN).unwrap();
-        let goal: i128 = env.storage().instance().get(&KEY_GOAL).unwrap();
-        let deadline: u64 = env.storage().instance().get(&KEY_DEADLINE).unwrap();
-        let min_contribution: i128 = env.storage().instance().get(&KEY_MIN).unwrap();
-        let max_contribution: i128 = env.storage().instance().get(&KEY_MAX).unwrap_or(0);
-        let title: String = env
-            .storage()
-            .instance()
+        // Cache the instance storage handle once — avoids 11 separate borrows,
+        // one for each field read below (gas opt #1321).
+        let inst = env.storage().instance();
+        let creator: Address = inst.get(&KEY_CREATOR).unwrap();
+        let token: Address = inst.get(&KEY_TOKEN).unwrap();
+        let goal: i128 = inst.get(&KEY_GOAL).unwrap();
+        let deadline: u64 = inst.get(&KEY_DEADLINE).unwrap();
+        let min_contribution: i128 = inst.get(&KEY_MIN).unwrap();
+        let max_contribution: i128 = inst.get(&KEY_MAX).unwrap_or(0);
+        let title: String = inst
             .get(&KEY_TITLE)
             .unwrap_or_else(|| String::from_str(&env, ""));
-        let description: String = env
-            .storage()
-            .instance()
+        let description: String = inst
             .get(&KEY_DESC)
             .unwrap_or_else(|| String::from_str(&env, ""));
-        let status: Status = env.storage().instance().get(&KEY_STATUS).unwrap();
-        let category: Category = env
-            .storage()
-            .instance()
+        let status: Status = inst.get(&KEY_STATUS).unwrap();
+        let category: Category = inst
             .get(&KEY_CATEGORY)
             .unwrap_or(Category::Other);
 
-        let (has_platform_config, platform_fee_bps, platform_address) = if let Some(config) = env
-            .storage()
-            .instance()
-            .get::<_, PlatformConfig>(&KEY_PLATFORM)
-        {
-            (true, config.fee_bps, config.address)
-        } else {
-            (false, 0, creator.clone())
-        };
+        let (has_platform_config, platform_fee_bps, platform_address) =
+            if let Some(config) = inst.get::<_, PlatformConfig>(&KEY_PLATFORM)
+            {
+                (true, config.fee_bps, config.address)
+            } else {
+                (false, 0, creator.clone())
+            };
 
         CampaignInfo {
             creator,

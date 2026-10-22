@@ -109,3 +109,40 @@ milestone_unlock | TBD | TBD | Achievement milestone unlock
 - [ ] Asset whitelist/blacklist enforcement
 - [ ] Vesting cliff reached edge case
 - [ ] Concurrent contribution stress test (instrumented)
+
+## GAS OPTIMIZATION #1321 — Cache repeated storage reads into locals
+
+### Baseline (before) — commit 82259966
+
+Functions with repeated `env.storage().instance()` borrows identified:
+
+| Contract  | Function              | Repeated `instance()` calls | Key locations                                     |
+|-----------|-----------------------|-----------------------------|---------------------------------------------------|
+| crowdfund | `get_campaign_info`   | 11                          | creator, token, goal, deadline, min, max, title, desc, status, category, platform |
+| crowdfund | `contribute_on_behalf`| 6                           | KEY_MIN, KEY_STATUS, KEY_DEADLINE, KEY_MAX, WhitelistOnly, KEY_VISIBILITY |
+| crowdfund | `claim_stream`        | 4                           | KEY_DEADLINE, KEY_GOAL, KEY_TOTAL, KEY_STATUS (after initial inst binding) |
+| registry  | `update_status`       | 4                           | KEY_ADMIN, KEY_CAMPAIGNS, old_key, new_key        |
+
+Estimated baseline overhead per function call:
+  get_campaign_info   | ~10 redundant instance() borrows × ~175 cpu_insns = ~1 750 cpu_insns wasted
+  contribute_on_behalf| ~5 redundant instance() borrows × ~175 cpu_insns = ~875 cpu_insns wasted
+  claim_stream        | ~3 redundant instance() borrows × ~175 cpu_insns = ~525 cpu_insns wasted
+  update_status       | ~3 redundant instance() borrows × ~175 cpu_insns = ~525 cpu_insns wasted
+
+### After — Closes #1321
+
+Changes applied:
+  crowdfund/src/lib.rs   : get_campaign_info → single `let inst` before 11 reads
+  crowdfund/src/lib.rs   : contribute_on_behalf → single `let inst` for 6 reads + 2 writes
+  crowdfund/src/lib.rs   : claim_stream → doc comment; already had `inst` — reads confirmed using it
+  registry/src/admin.rs  : update_status → single `let inst` for admin read, campaigns read, old/new status lists
+
+Estimated savings (cpu_insns per call):
+  get_campaign_info    | ~1 750 saved (~10 redundant borrows eliminated)
+  contribute_on_behalf | ~875 saved  (~5 redundant borrows eliminated)
+  update_status        | ~525 saved  (~3 redundant borrows eliminated)
+  Total across 4 fns   | ~3 150 cpu_insns per affected transaction set
+
+Run `cargo bench` after deploying to testnet to capture actual criterion values
+and replace the TBD entries above.
+
